@@ -9,7 +9,6 @@ import { ALIASES, CANCEL_SYMBOL, KEYS, diffLines, hasAliasKey, setRawMode } from
 
 import type { ClackEvents, ClackState, InferSetType } from '../types';
 
-// trigger build
 export interface PromptOptions<Self extends Prompt> {
 	render(this: Omit<Self, 'prompt'>): string | undefined;
 	placeholder?: string;
@@ -24,9 +23,9 @@ export interface PromptOptions<Self extends Prompt> {
 export default class Prompt {
 	protected input: Readable;
 	protected output: Writable;
-	private abortController?: AbortSignal;
+	private _abortSignal?: AbortSignal;
 
-	private rl!: ReadLine;
+	private rl: ReadLine | undefined;
 	private opts: Omit<PromptOptions<Prompt>, 'render' | 'input' | 'output'>;
 	private _render: (context: Omit<Prompt, 'prompt'>) => string | undefined;
 	private _track = false;
@@ -47,7 +46,7 @@ export default class Prompt {
 		this.render = this.render.bind(this);
 		this._render = render.bind(this);
 		this._track = trackValue;
-		this.abortController = signal;
+		this._abortSignal = signal;
 
 		this.input = input;
 		this.output = output;
@@ -115,22 +114,25 @@ export default class Prompt {
 
 	public prompt() {
 		return new Promise<string | symbol>((resolve, reject) => {
-			if (this.abortController) {
-				this.abortController.addEventListener(
-					'abort',
-					() => {
-						this.state = 'cancel';
-						this.close();
-					},
-					{ once: true }
-				);
+			if (this._abortSignal) {
+				if (this._abortSignal.aborted) {
+					this.state = 'cancel';
+
+					this.close();
+					return resolve(CANCEL_SYMBOL);
+				}
+
+				this._abortSignal.addEventListener('abort', () => {
+					this.state = 'cancel';
+					this.close();
+				}, { once: true });
 			}
 
 			const sink = new WriteStream(0);
 			sink._write = (chunk, encoding, done) => {
 				if (this._track) {
-					this.value = this.rl.line.replace(/\t/g, '');
-					this._cursor = this.rl.cursor;
+					this.value = this.rl?.line.replace(/\t/g, '');
+					this._cursor = this.rl?.cursor ?? 0;
 					this.emit('value', this.value);
 				}
 				done();
@@ -186,7 +188,7 @@ export default class Prompt {
 		}
 		if (char === '\t' && this.opts.placeholder) {
 			if (!this.value) {
-				this.rl.write(this.opts.placeholder);
+				this.rl?.write(this.opts.placeholder);
 				this.emit('value', this.opts.placeholder);
 			}
 		}
@@ -200,7 +202,7 @@ export default class Prompt {
 				if (problem) {
 					this.error = problem;
 					this.state = 'error';
-					this.rl.write(this.value);
+					this.rl?.write(this.value);
 				}
 			}
 			if (this.state !== 'error') {
@@ -225,7 +227,8 @@ export default class Prompt {
 		this.input.removeListener('keypress', this.onKeypress);
 		this.output.write('\n');
 		setRawMode(this.input, false);
-		this.rl.close();
+		this.rl?.close();
+		this.rl = undefined;
 		this.emit(`${this.state}`, this.value);
 		this.unsubscribe();
 	}
